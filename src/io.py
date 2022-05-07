@@ -90,3 +90,19 @@ def update_index_file_anova(data, json_filepath, filename):
     json.dump(json_object, f)
     f.close()
 
+
+def update_index_base_data_anova(data, json_filepath, filename):
+    #Load index
+    f = open(f"{json_filepath}/{filename}.json", "r")
+    json_object = json.load(f)
+    f.close()
+
+    json_object["anova_data"] = {}
+    json_object["anova_data"]["bases"] = data
+
+    #Write updated version
+    f = open(f"{json_filepath}/{filename}.json", "w")
+    json.dump(json_object, f)
+    f.close()
+
+    
