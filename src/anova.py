@@ -1,439 +1,326 @@
-from Bio.Seq import Seq
+from multiprocessing import Pool
+from functools import partial
+from datetime import datetime
+import time
+import pandas as pd
+import numpy as np
 from Bio.SeqRecord import SeqRecord
 from Bio.Align import MultipleSeqAlignment
-from Bio import AlignIO
-
-import scipy.stats as stats
-import os, sys, time
-import numpy as np
-import pandas as pd
-from src.io import read_phenotypes_file, read_phylip_file
-from .utils import get_filename
+from scipy.stats import f_oneway
 
 
-def detect_pvalue(pvalue):
-    if pvalue <= 0.05:
+from src.io import check_directory, check_working_os, get_filepaths, read_phenotypes_file, read_phylip_file, write_phylip_file, write_pandas_csv
+from src.utils import get_filename, get_all_filenames
+from src.filters import eliminate_columns_based_on_list
+from src.indexes import insert_length, insert_col_positions_data
+
+VALID_PHENOTYPES = ["SM300-Efficiency", "SM300-Rate", "SM300-Lag", "SM300-AUC",
+                    "SM60-Efficiency",  "SM60-Rate",  "SM60-Lag",  "SM60-AUC",
+                    "Ratio-Efficiency", "Ratio-Rate", "Ratio-Lag", "Ratio-AUC"]
+VALID_CHROMOSOMES = ["haploide-euploide", "diploides-euploides", "---", "all"]
+log_results = []
+
+
+def do_folder_validations(with_phenotypes, phenotype, p_value, chromosome, ANOVA_DATASET_PATH):
+    if with_phenotypes == "particular": 
+        if phenotype not in VALID_PHENOTYPES:
+            print(f"phenotype: {phenotype} is not valid.")
+            return ""
+
+    if chromosome not in VALID_CHROMOSOMES:
+        print(f"chromosome: {chromosome} is not valid.")
+        return ""
+    
+    #Check si existe el directorio principal
+    check_directory(ANOVA_DATASET_PATH)
+
+    #Chequeo si el directorio que separa los anovas a realizar existe
+    WITH_PHENOTYPES_DATASET_PATH = ""
+    if with_phenotypes == "at_least_one":
+        if check_working_os():
+            WITH_PHENOTYPES_DATASET_PATH = ANOVA_DATASET_PATH + "/" + "anova_at_least_one_phenotype"
+        else:
+            WITH_PHENOTYPES_DATASET_PATH = ANOVA_DATASET_PATH + "\\" + "anova_at_least_one_phenotype"
+
+
+    if with_phenotypes == "particular":
+        if check_working_os():
+            WITH_PHENOTYPES_DATASET_PATH = ANOVA_DATASET_PATH + "/" + "anova_particular_phenotype"
+        else:
+            WITH_PHENOTYPES_DATASET_PATH = ANOVA_DATASET_PATH + "\\" + "anova_particular_phenotype"
+
+    check_directory(WITH_PHENOTYPES_DATASET_PATH)
+
+    #Chequeo que el directorio para ese p_value exista
+    PVALUE_DATASET_PATH = ""
+    if check_working_os():
+        PVALUE_DATASET_PATH = WITH_PHENOTYPES_DATASET_PATH + "/" + "p_value_" + str(p_value).replace(".", "_")
+    else:
+        PVALUE_DATASET_PATH = WITH_PHENOTYPES_DATASET_PATH + "\\" + "p_value_" + str(p_value).replace(".", "_")
+
+    check_directory(PVALUE_DATASET_PATH)
+
+    #chequeo que el directorio para ese chromosoma exista
+    CHROMOSOME_DATASET_PATH = ""
+    if check_working_os():
+        CHROMOSOME_DATASET_PATH = PVALUE_DATASET_PATH + "/" + chromosome
+    else:
+        CHROMOSOME_DATASET_PATH = PVALUE_DATASET_PATH + "\\" + chromosome
+
+    check_directory(CHROMOSOME_DATASET_PATH)
+
+    #A;ado a la ruta la carpeta del fenotipo si estoy en el caso de 1 solo en particular
+    FINAL_PATH = ""
+    if with_phenotypes == "particular":
+        if check_working_os():
+            FINAL_PATH = CHROMOSOME_DATASET_PATH + "/" + phenotype
+        else:
+            FINAL_PATH = CHROMOSOME_DATASET_PATH + "\\" + phenotype
+
+    if with_phenotypes == "at_least_one":
+        if check_working_os():
+            FINAL_PATH = CHROMOSOME_DATASET_PATH
+        else:
+            FINAL_PATH = CHROMOSOME_DATASET_PATH
+
+    check_directory(FINAL_PATH)
+
+    #Creamos el directorio para los archivos csv con los resultados del anova
+    CSV_FINAL_PATH = ""
+    if check_working_os():
+        CSV_FINAL_PATH = FINAL_PATH + "/" + "csv"
+    else:
+        CSV_FINAL_PATH = FINAL_PATH + "\\" + "csv"
+
+    check_directory(CSV_FINAL_PATH)
+
+    return FINAL_PATH, CSV_FINAL_PATH
+
+
+def filter_filepaths(filepaths = [], DATASET_PATH = ""):
+    dataset_filepaths = get_filepaths(DATASET_PATH)
+    dataset_filenames = get_all_filenames(dataset_filepaths)
+
+    filtered_list = []
+    for fp in filepaths:
+        filename = get_filename(fp)
+        if filename not in dataset_filenames:
+            filtered_list.append(fp) 
+
+    return filtered_list
+
+
+def order_phenotypes_by_files_id(example_filepath, phenotypes_df):
+    data = read_phylip_file(example_filepath)
+    id_rows = []
+    for row in data:
+        id_rows.append(row.id)
+
+    df_mapping = pd.DataFrame({"ids": id_rows})
+    sort_mapping = df_mapping.reset_index().set_index('ids')
+
+    phenotypes_df["Standard_num"] = phenotypes_df["Standard"].map(sort_mapping["index"])
+    phenotypes_df = phenotypes_df.sort_values("Standard_num")
+
+    return phenotypes_df
+
+
+def filtered_data(data, phenotypes_df):
+    filtered_data = []
+    ids = phenotypes_df["Standard"].tolist()
+    for row in data:
+        if data[row].id in ids:
+            filtered_data.append(SeqRecord(data[row], id=data[row].id))
+    
+    return MultipleSeqAlignment(filtered_data)
+
+
+def detect_pvalue(threshold, pvalue):
+    if pvalue <= threshold:
         return True
     return False
+ 
+
+def do_anova_per_column(col, bases, df, phenotypes_to_do, anova_res_df, 
+            cols_to_eliminate, cols_not_eliminated, p_value, type_anova,
+            filename):
+    #Las agrego los datos al df a trabajar
+    df["bases"] = bases
+
+    #Obtengo las bases unicas para esa columna
+    unique_bases = set(bases)
+
+    pvalue_detections = []
+    for pt in phenotypes_to_do:
+        to_pass = []
+        for key in unique_bases:
+            temp = df.loc[df["bases"] == key][pt].tolist()
+            to_pass.append(temp)
+        
+        if len(to_pass) >= 2:
+            anova_result = f_oneway(*to_pass)
+
+            #Agregamos la info de la operacion al df de resultados del anova
+            anova_res_df.loc[anova_res_df["col"] == col, pt + "_statistic"] = anova_result.statistic
+            anova_res_df.loc[anova_res_df["col"] == col, pt + "_pvalue"] = anova_result.pvalue
+
+            #Decidimos si dejamos o no la columna
+            #Se comporta diferente para 'at_least_one' o para 'particular':
+            if type_anova == "particular":
+                if not detect_pvalue(p_value, anova_result.pvalue):
+                    #Columna no guardada
+                    cols_to_eliminate.append(col)
+                else:
+                    #Columna guardada
+                    cols_not_eliminated.append(col)
+            
+            if type_anova == "at_least_one":
+                pvalue_detections.append(detect_pvalue(p_value, anova_result.pvalue))
+        else:
+            print(f"File: {filename} no presenta variacion en la columna {col}")
+    
+    if type_anova == "at_least_one":
+        if True in pvalue_detections:
+            cols_not_eliminated.append(col)
+        else:
+            cols_to_eliminate.append(col)
 
 
-def get_data_ids(dataset):
-    #Todos los archivos poseen los mismos IDS
-    #en el mismo orden, por lo que extraemos los del 1er. archivo
-    ids = []
-    for elem in dataset[0]["data"]:
-        ids.append(elem.id)
+def do_anova(type_anova, phenotype, p_value, chromosome, phenotypes_df, 
+        DATASET_PATH, CSV_DATASET_PATH, INDEX_PATH, filepath):
+    start = time.time()
 
-    return ids
+    filename = get_filename(filepath)
+    data = read_phylip_file(filepath)
+
+    phenotypes_df = order_phenotypes_by_files_id(filepath, phenotypes_df)
+
+    #print(f"File: {filename}")
+
+    #Filtro los datos si cambia la seleccion del cromosoma
+    #Debido a que esto reduce la cantidad de filas
+    if chromosome != "all":
+        data = filtered_data(data, phenotypes_df)
+
+    #Df que guarda los resultados de los anova por columna
+    anova_res_df = pd.DataFrame({"col": range(data.get_alignment_length())})
+
+    if type_anova == "at_least_one":
+        #Agrego al anova_res_df las columnas de los fenotipos
+        #tanto en el statistic y el pvalue
+        for pt in VALID_PHENOTYPES:
+            anova_res_df[pt + "_statistic"] = np.zeros(data.get_alignment_length())
+            anova_res_df[pt + "_pvalue"] = np.zeros(data.get_alignment_length())
+
+    if type_anova == "particular":
+        #Agrego al anova_res_df la columna del fenotipo
+        #tanto en el statistic y el pvalue
+        anova_res_df[phenotype + "_statistic"] = np.zeros(data.get_alignment_length())
+        anova_res_df[phenotype + "_pvalue"] = np.zeros(data.get_alignment_length())
+    
+    #Listado que almacena los indices de las columnas que se filtran
+    cols_to_eliminate = []
+    cols_not_eliminated = []
+
+    #Creo un dataframe con los datos 
+    df = phenotypes_df.copy()
+    for col in range(data.get_alignment_length()):
+        #Extraigo las bases de esa columna
+        bases = list(data[:, col])
+
+        if type_anova == "at_least_one":
+            do_anova_per_column(col, bases, df, VALID_PHENOTYPES, 
+                    anova_res_df, cols_to_eliminate, cols_not_eliminated, 
+                    p_value, type_anova, filename)
+        
+        if type_anova == "particular":
+            do_anova_per_column(col, bases, df, [phenotype], 
+                    anova_res_df, cols_to_eliminate, cols_not_eliminated, 
+                    p_value, type_anova, filename)
+
+    #Consultados si tenemos elementos a eliminar, si es asi
+    #Construimos los nuevos datos y los guardamos
+    file_length = 0
+    if cols_to_eliminate != []:
+        new_data = eliminate_columns_based_on_list(data, cols_to_eliminate)
+        file_length = new_data.get_alignment_length()
+
+        if file_length != 0:
+            #Guardamos los nuevos datos
+            write_phylip_file(new_data, DATASET_PATH, filename)
+
+            #Guardamos el csv con los datos obtenidos de los anova realizados
+            write_pandas_csv(anova_res_df, CSV_DATASET_PATH, filename)
+
+            #Actualizamos el indice del archivo, para guardar las columnas y el largo del nuevo archivo
+            insert_col_positions_data(cols_not_eliminated, "anova", INDEX_PATH, filename)
+            insert_length(file_length, "anova", INDEX_PATH, filename)
+        else:
+            print(f"File: {filename} elimina todas sus columnas. Por file_length: {file_length}")
+            
+    else:
+        print(f"File: {filename} elimina todas sus columnas. Por cols_to_eliminate: {len(cols_to_eliminate)}")
 
 
-def do_anova_task(dataset, phenotypes_dataset):
-    #Extrae los nombres de los fenotipos
-    phenotypes_names = list(phenotypes_dataset.keys()[2:-1].astype('str').values)
-    #phenotypes_standard = phenotypes_dataset.loc[:, "Standard"].tolist()
+    end = time.time()
+    #return f"File: {filename} took {round(end-start, 2)}"
 
+
+def log_do_anova(t):
+    log_results.append(t)
+
+
+def do_multiprocess_anova(type_anova="particular", phenotype="", p_value=0.05, 
+                        chromosome="", pool_workers=1, 
+                        ANOVA_DATASET_PATH="", CLEAN_DATASET_PATH="", 
+                        PHENOTYPES_PATH="", INDEX_PATH=""):
     """
-        Por cada archivo. 
-        data = {
-            "filepath": './etc/',
-            "filename": 'YALSAD...',
-            "data": MultipleSeqAlignment object
-        }
+        type_anova: Posibles valores "particular" o "at_least_one", se refiere a si se hara un anova
+                    considerando un solo fenotipo en particular (particular) o al que pase al menos 1 (at_least_one)
+        phenotype: Escoge el fenotipo a realizar, si se realiza sobre todos los fenotipos, dejar en blanco
+        p_value: Valor discriminante en el resultado del anova
+        chromosome: Filtra por tipo de cromosomas las columnas, valores posibles: ["haploide-euploide", "diploides-euploides", "---", "all"]
+        pool_workers:  
     """
 
-    data_ids = get_data_ids(dataset)
+    DATASET_PATH, CSV_DATASET_PATH = do_folder_validations(type_anova, phenotype, p_value, chromosome, ANOVA_DATASET_PATH)
 
-    for data in dataset:
-        start = time.time()
+    filepaths = get_filepaths(CLEAN_DATASET_PATH)
+    filtered_filepaths = filter_filepaths(filepaths, DATASET_PATH)
 
-        #print("===========")
-        #print(f"len: {data['data'].get_alignment_length()}")
-
-        n = len(data["data"])
-
-        #Almacena los resultados del anova por cada columna en forma de 1 o 0
-        col_n = data["data"].get_alignment_length()
-        save_anova_res = {
-            'col': range(col_n),
-            'SM300-Efficiency': np.zeros(col_n),
-            'SM300-Rate': np.zeros(col_n),
-            'SM300-Lag': np.zeros(col_n),
-            'SM300-AUC': np.zeros(col_n),
-            'SM60-Efficiency': np.zeros(col_n),
-            'SM60-Rate': np.zeros(col_n),
-            'SM60-Lag': np.zeros(col_n),
-            'SM60-AUC': np.zeros(col_n),
-            'Ratio-Efficiency': np.zeros(col_n),
-            'Ratio-Rate': np.zeros(col_n),
-            'Ratio-Lag': np.zeros(col_n),
-            'Ratio-AUC': np.zeros(col_n)
-        }
-
-        anova_res_per_phenotype_df = pd.DataFrame(data=save_anova_res)
-        cols_not_eliminated = []
-
-        #Por cada columna en los datos
-        for col in range(data["data"].get_alignment_length()):
-            start2 = time.time()
-            #print(f"col: {col}")
-
-            df_structure = {
-                'ids': data_ids, 
-                'base': list(data["data"][:, col]),
-                'SM300-Efficiency': np.zeros(n),
-                'SM300-Rate': np.zeros(n),
-                'SM300-Lag': np.zeros(n),
-                'SM300-AUC': np.zeros(n),
-                'SM60-Efficiency': np.zeros(n),
-                'SM60-Rate': np.zeros(n),
-                'SM60-Lag': np.zeros(n),
-                'SM60-AUC': np.zeros(n),
-                'Ratio-Efficiency': np.zeros(n),
-                'Ratio-Rate': np.zeros(n),
-                'Ratio-Lag': np.zeros(n),
-                'Ratio-AUC': np.zeros(n)
-            }
-
-            col_df = pd.DataFrame(data=df_structure)
-
-            #Añado los datos del csv de fenotipos al dataframe 
-            for index, row in col_df.iterrows():
-                filtered = phenotypes_dataset.loc[phenotypes_dataset["Standard"] == row["ids"]]
-                filtered = filtered.values[:, 2:14].tolist()
-
-                if len(filtered) != 0:
-                    col_df.loc[index, ["SM300-Efficiency", "SM300-Rate","SM300-Lag","SM300-AUC",
-                                        "SM60-Efficiency","SM60-Rate","SM60-Lag","SM60-AUC",
-                                        "Ratio-Efficiency","Ratio-Rate","Ratio-Lag","Ratio-AUC"]] = filtered[0]
-
-            #Obtengo las llaves unicas para esa columna
-            unique_keys = set(list(data["data"][:, col]))
-
-            #Ahora por cada fenotipo, realizo el anova de esta columna
-            #primero creo un dict de cada fenotipo
-            col_anova_data = {}
-            for phenotype in phenotypes_names:
-                col_anova_data[phenotype] = {}
-                
-                for key in unique_keys:
-                    col_anova_data[phenotype][key] = col_df.loc[col_df["base"] == key, phenotype].tolist()
-
-            
-            #Se utiliza para saber si la columna se conserva en el archivo o se elimina
-            delete_col = True
-            phenotypes_test_results = []
-
-            #Ahora que tengo el dataframe con los datos de cada fenotipo por base de la columna
-            #puedo realizar el test anova por cada fenotipo
-            df_to_test = pd.DataFrame.from_dict(col_anova_data, orient='index')
-
-            if len(df_to_test.loc[phenotype]) != 1:
-                for phenotype in phenotypes_names:
-                    res = stats.f_oneway(*df_to_test.loc[phenotype])
-                    #print(f"col: {col} - fenotipo: {phenotype}")
-                    #print(f"    pvalue: {res.pvalue}")
-                    #Detectamos el pvalue para este fenotipo
-                    #si es positivo quiere decir que la columna se conserva, sino se elimina
-                    if detect_pvalue(res.pvalue):
-                        phenotypes_test_results.append(1)
-                        delete_col = False
-                    else:
-                        phenotypes_test_results.append(0)
-
-                #Añado los resultados obtenidos de los anovas al df
-                anova_res_per_phenotype_df.loc[col, ["SM300-Efficiency", "SM300-Rate","SM300-Lag","SM300-AUC",
-                                                    "SM60-Efficiency","SM60-Rate","SM60-Lag","SM60-AUC",
-                                                    "Ratio-Efficiency","Ratio-Rate","Ratio-Lag","Ratio-AUC"]] = phenotypes_test_results
-
-
-            if not delete_col:
-                cols_not_eliminated.append(col)
-            #else:
-            #    print(f"col: {col} is eliminated")
-
-
-            #print(f"len(phenotypes_test_results): {len(phenotypes_test_results)}")
-
-            
-            #print(f"cols not eliminated: {cols_not_eliminated}")
-            #print(f"phenotypes_test_results: {phenotypes_test_results}")
-            #print(anova_res_per_phenotype_df.head(n=30))
-            
-            end2 = time.time()
-            print("Time per col :", end2-start2)
-        end = time.time()
-        print("Total by file:", end-start)
-        #sys.exit()
-        break
-
-        #data["cols_not_eliminated"] = cols_not_eliminated
-        #print(data["cols_not_eliminated"])
-
-        
-
-
-
-            # data_to_test = {}
-
-            # #Por cada fenotipo
-            # for phenotype in phenotypes_names:
-            #     print(f"     {phenotype}")
-            #     data_to_test[phenotype] = {}
-            #     for key in unique_keys:
-            #         data_to_test[phenotype][key] = []
-
-            #     #Por cada fila en la columna
-            #     for row in range(len(data["data"])):
-            #         if data["data"][row].id in phenotypes_standard:
-            #             base = data["data"][row, col]
-            #             datum = phenotypes_dataset[phenotypes_dataset["Standard"] == data["data"][row].id][phenotype].astype('float64').values[0]
-            #             data_to_test[phenotype][base].append(datum)
-
-            # anova_data.append(data_to_test)
-
-        
-            # print()
-            # print(anova_data[0])
-            # print("===========")
-
-            
-
-
-
-def clean_dataset_by_id(dataset, phenotypes_dataset):
-    phenotypes_ids = phenotypes_dataset.loc[:, "Standard"].tolist()
-
-    for data in dataset:
-        new_seq = []
-        for row in data["data"]:
-            if row.id in phenotypes_ids:
-                new_seq.append(row)
-
-        data["data"] = MultipleSeqAlignment(new_seq)
+    #Cargo el dataframe del archivo de fenotipos
+    phenotypes_df = read_phenotypes_file(PHENOTYPES_PATH)
     
-    return dataset
-
-
-def check_anova_file(filename="", base_dir=""):
-    if os.path.exists(f"{base_dir}/{filename}.fasta.phylip"):
-        return True
+    #Filtro los datos dependiendo del cromosoma que ocupare
+    if chromosome != "all":
+        phenotypes_df = phenotypes_df.loc[phenotypes_df["Haploide-Diploide"] == chromosome]
     
-    return False
+    #Filtro el para los fenotipos
+    if type_anova == "particular":
+        phenotypes_df = phenotypes_df[["Standard", phenotype]]
 
+    print(f"===== Start: {datetime.today().strftime('%d-%m-%Y %H:%M:%S')}  ======")
+    start = time.time()
+          
+    p = Pool(pool_workers)
+    # p.map_async(partial(do_anova, type_anova, phenotype, p_value, chromosome, phenotypes_df, 
+    #         DATASET_PATH, CSV_DATASET_PATH, INDEX_PATH), filtered_filepaths)
 
-def do_anova(filepaths=[], base_dir="", phenotypes_filepath=""):
-    if filepaths == []:
-        print("filepaths is empty")
-        return False
+    # p.map(partial(do_anova, type_anova, phenotype, p_value, chromosome, 
+    #         phenotypes_df, DATASET_PATH, CSV_DATASET_PATH, INDEX_PATH), filtered_filepaths)
 
-    if base_dir == "":
-        print("base_dir is empty")
-        return False
+    p.imap(partial(do_anova, type_anova, phenotype, p_value, chromosome, phenotypes_df, 
+                        DATASET_PATH, CSV_DATASET_PATH, INDEX_PATH), filtered_filepaths)
 
-    if phenotypes_filepath == "":
-        print("phenotypes_filepath is empty")
-        return False
+    # for fp in filtered_filepaths:
+    #     p.apply_async(do_anova, args=(type_anova, phenotype, p_value, chromosome, phenotypes_df, 
+    #                             DATASET_PATH, CSV_DATASET_PATH, INDEX_PATH, fp, ), callback=log_do_anova)
 
-    #Cargamos el dataset de fenotipos
-    phenotypes_dataset = read_phenotypes_file(phenotypes_filepath)
+    p.close()
+    p.join()
 
-    #Cargamos en memoria el dataset
-    dataset = []
-    for filepath in filepaths:
-        #Chequeo si ya fue testeado
-        filename = get_filename(filepath=filepath)
-        if not check_anova_file(filename, base_dir):
-            #print(f"Nuevo archivo: {filename}")
-            data = {}
-            data["filepath"] = filepath
-            data["filename"] = filename
-            data["data"] = read_phylip_file(filepath)
+    print(INDEX_PATH)
 
-            dataset.append(data)
-
-
-    print(f"filename: {dataset[0]['filename']} / len: {len(dataset[0]['data'])}")
-    print(f"filename: {dataset[10]['filename']} / len: {len(dataset[10]['data'])}")
-
-    #Limpiar datos, debido a que el archivo de fenotipos no
-    #presenta todos los ID, debemos remover aquellas columnas que no se encuentran.
-    #dataset = clean_dataset_by_id(dataset, phenotypes_dataset)
-    dataset = clean_dataset_by_id(dataset, phenotypes_dataset)
-
-    print(f"filename: {dataset[0]['filename']} / len: {len(dataset[0]['data'])}")
-    print(f"filename: {dataset[10]['filename']} / len: {len(dataset[10]['data'])}")
-
-    #Por cada archivo realizamos el anova correspondiente
-    do_anova_task(dataset, phenotypes_dataset)
-
-
-
-
-# def clean_compressed_file(path, standard_list):
-#     data = read_phylip_file(path)
-    
-#     new_align = []
-#     for row in range(len(data)):
-#         if data[row].id in standard_list:
-#             new_align.append(SeqRecord(Seq(data[row].seq), id=data[row].id))
-#     return MultipleSeqAlignment(new_align)
-
-
-# def get_index_based_on_id(data, seq_id):
-#     index = 0
-#     for row in range(len(data)):
-#         if seq_id == data[row].id:
-#             #print(f"seq_id: {seq_id} , data[row].id: {data[row].id}")
-#             return index
-#         index += 1
-#     return -1
-
-# def prepare_dataframe(data, phenotype_df, type_haploide_diploide):
-#     """
-#         - type_phenotype: Posee 4 tipos de entrada que corresponden con las columnas de los fenotipos -> "Efficiency", "Rate", "Lag", "AUC"
-#         - type_haploide_diploide: 4 tipos de entrada, "all", "haploide_euploide", "diploide_euploide", "--"
-#     """
-    
-#     """
-#     if type_phenotype == "Efficiency":
-#         new_dataframe = phenotype_df[["Standard", "SM300-Efficiency", "SM60-Efficiency", "Ratio-Efficiency"]]
-#     elif type_phenotype == "Rate":
-#         new_dataframe = phenotype_df[["Standard", "SM300-Rate", "SM60-Rate", "Ratio-Rate"]]
-#     elif type_phenotype == "Lag":
-#         new_dataframe = phenotype_df[["Standard", "SM300-Lag", "SM60-Lag", "Ratio-Lag"]]
-#     elif type_phenotype == "AUC":
-#         new_dataframe = phenotype_df[["Standard", "SM300-AUC", "SM60-AUC", "Ratio-AUC"]]
-#     else:
-#         print("Wrong 'type_phenotype'.")
-#         return []
-#     """
-    
-    
-#     if type_haploide_diploide == "all":
-#         new_dataframe = phenotype_df.copy()
-        
-#         new_columns = {}
-#         for col in range(data.get_alignment_length()):
-#             col_seq = []
-#             for ind in new_dataframe.index:
-#                 index = get_index_based_on_id(data, new_dataframe["Standard"][ind])
-#                 col_seq.append(data[index, col])
-
-#             new_key = "x" + str(col)
-#             new_columns[new_key] = pd.Series(col_seq, index=new_dataframe.index, name=new_key)
-        
-#         temp = pd.DataFrame(new_columns)
-#         final = pd.concat([new_dataframe, temp], axis=1)
-#         return final
-        
-#     else:
-#         print("Not implemented yet.")
-#         return []    
-    
-    
-# def get_phenotype_data_per_base(data, data_col_name, phenotypes_keys, base_keys):
-#     phenotype_data_per_base = {}
-#     for gen in base_keys:
-#         phenotype_data_per_base[gen] = {}
-#         for key in phenotypes_keys:
-#             phenotype_data_per_base[gen][key] = data[data[data_col_name] == gen][key].tolist()
-    
-#     return phenotype_data_per_base
-
-# def do_anova(data):
-#     df = pd.DataFrame.from_dict(data, orient='index')
-#     output = {}
-    
-#     for key in df:
-#         fvalue, pvalue = stats.f_oneway(*df[key])
-#         output[key] = {}
-#         output[key]["fvalue"] = round(fvalue, 4)
-#         output[key]["pvalue"] = round(pvalue, 4)
-        
-#     return output
-
-# def detect_pvalue(data):
-#     for key in data:
-#         if data[key]['pvalue'] <= 0.05:
-#             return True, key
-    
-#     return False, ''
-        
-# def get_anova_file(data, phenotypes_df, START_SEQ_ROW = 15):
-#     index = 0
-#     phenotypes_keys = phenotypes_df.keys()[2:-1]
-    
-#     overall_anova = []
-#     for column in data.columns[START_SEQ_ROW:]:
-#         results = {}
-        
-#         base_keys = data[column].unique().tolist()
-#         if(len(base_keys) == 1):
-#             continue
-        
-#         phenotype_data_per_base = get_phenotype_data_per_base(data, column, phenotypes_keys, base_keys)
-#         output = do_anova(phenotype_data_per_base)
-#         value, key_name = detect_pvalue(output)
-        
-#         results['index'] = index
-#         results['col'] = column
-#         results['significance'] = {
-#             'value': value,
-#             'key_name': key_name
-#         }
-#         results['anova_data'] = output
-        
-#         index += 1
-#         overall_anova.append(results)
-    
-#     return overall_anova
-
-
-# def clean_data_based_on_anova(anova_results, data, phenotypes_df):
-#     align = []
-#     indexes_to_remove = []
-    
-#     for res in anova_results:
-#         if res["significance"]["value"] == True:
-#             indexes_to_remove.append(res["index"])
-            
-#     for seq in data:
-#         if seq.id in phenotypes_df["Standard"].tolist():
-#             sequence_to_clean = list(str(seq.seq))
-        
-#             for i in indexes_to_remove:
-#                 sequence_to_clean[i] = ''
-                
-#             cleaned_seq = "".join(sequence_to_clean)
-#             align.append(SeqRecord(Seq(cleaned_seq), id=seq.id))
-            
-#     return MultipleSeqAlignment(align)
-
-
-# def write_phylip_file(data, path, filename):
-#     if data == []:
-#         print("No data.")
-#         return False
-    
-#     with open(f"{path}\\{filename}.phylip", "w") as handle:
-#         AlignIO.write(data, handle, "phylip-sequential")
-
-
-# def do_anova_task(path, phenotypes_df):
-#     ANOVA_RESULTS = "C:\\Users\\Hector\\Desktop\\code\\sc_regmod\\dataset\\anova_results"
-
-#     #print(f"Thread starting with ind: {counter}, file: {path}")
-    
-#     start_time = time.time()
-    
-#     data = read_phylip_file(path)
-    
-#     anova_data = prepare_dataframe(data, phenotypes_df, "all")
-    
-#     overall_data = get_anova_file(anova_data, phenotypes_df)
-    
-#     new_align = clean_data_based_on_anova(overall_data, data, phenotypes_df)
-    
-#     write_phylip_file(new_align, ANOVA_RESULTS, path.split("\\")[-1])
-    
-#     print("Create the file {} took: {:.2f} sec".format(path.split("\\")[-1], (time.time() - start_time)))
+    end = time.time()
+    print(f"It took: {round((end-start)/60, 2)}")
+    print("=======================")
