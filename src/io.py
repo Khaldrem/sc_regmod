@@ -3,7 +3,7 @@ import os, glob, json
 from sys import platform
 from Bio import AlignIO
 
-from src.utils import check_working_os, check_directory
+from src.utils import check_working_os, check_directory, get_anova_filepaths
     
 
 def get_filepaths(base_path = ""):
@@ -62,6 +62,7 @@ def write_phylip_file(data, path="", filename=""):
 
 def write_pandas_csv(data, path="", filename=""):
     final_path = ""
+    check_directory(path)
 
     if check_working_os():
         final_path = f"{path}/{filename}.csv"
@@ -161,4 +162,25 @@ def update_index_base_data_anova(data, json_filepath, filename):
     json.dump(json_object, f)
     f.close()
 
+
+def check_if_anova_files_exists(base_path="", type_anova="", p_value_threshold=0, chromosome=""):
+    if base_path == "" or type_anova == "" or chromosome == "":
+        print("A parameter in check_anova_files is empty.")
+        return False
     
+    anova_path = get_anova_filepaths(base_path, type_anova, p_value_threshold, chromosome)
+    if anova_path != "":
+        files = get_filepaths(anova_path)
+        if len(files) != 0:
+            return True
+            
+    return False
+
+
+def check_if_models_exists(exp_number = "", MODELS_BASE_PATH="", type_model=""):
+    final_path = MODELS_BASE_PATH + "/" + type_model + "/" + exp_number
+    if os.path.exists(final_path):
+        files = glob.glob(f"{final_path}/*.joblib")
+        if len(files) != 0:
+            return True
+    return False

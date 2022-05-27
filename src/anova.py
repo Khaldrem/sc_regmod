@@ -129,8 +129,8 @@ def filtered_data(data, phenotypes_df):
     filtered_data = []
     ids = phenotypes_df["Standard"].tolist()
     for row in data:
-        if data[row].id in ids:
-            filtered_data.append(SeqRecord(data[row], id=data[row].id))
+        if row.id in ids:
+            filtered_data.append(SeqRecord(row.seq, id=row.id))
     
     return MultipleSeqAlignment(filtered_data)
 
@@ -176,8 +176,8 @@ def do_anova_per_column(col, bases, df, phenotypes_to_do, anova_res_df,
             
             if type_anova == "at_least_one":
                 pvalue_detections.append(detect_pvalue(p_value, anova_result.pvalue))
-        else:
-            print(f"File: {filename} no presenta variacion en la columna {col}")
+        # else:
+        #     print(f"File: {filename} no presenta variacion en la columna {col}")
     
     if type_anova == "at_least_one":
         if True in pvalue_detections:
@@ -188,14 +188,12 @@ def do_anova_per_column(col, bases, df, phenotypes_to_do, anova_res_df,
 
 def do_anova(type_anova, phenotype, p_value, chromosome, phenotypes_df, 
         DATASET_PATH, CSV_DATASET_PATH, INDEX_PATH, filepath):
-    start = time.time()
-
     filename = get_filename(filepath)
     data = read_phylip_file(filepath)
 
     phenotypes_df = order_phenotypes_by_files_id(filepath, phenotypes_df)
 
-    #print(f"File: {filename}")
+    # print(f"File: {filename} - alignment length: {data.get_alignment_length()}")
 
     #Filtro los datos si cambia la seleccion del cromosoma
     #Debido a que esto reduce la cantidad de filas
@@ -255,15 +253,12 @@ def do_anova(type_anova, phenotype, p_value, chromosome, phenotypes_df,
             #Actualizamos el indice del archivo, para guardar las columnas y el largo del nuevo archivo
             insert_col_positions_data(cols_not_eliminated, "anova", INDEX_PATH, filename)
             insert_length(file_length, "anova", INDEX_PATH, filename)
-        else:
-            print(f"File: {filename} elimina todas sus columnas. Por file_length: {file_length}")
+    #     else:
+    #         print(f"        + File: {filename} elimina todas sus columnas. Por file_length: {file_length}")
             
-    else:
-        print(f"File: {filename} elimina todas sus columnas. Por cols_to_eliminate: {len(cols_to_eliminate)}")
+    # else:
+    #     print(f"        + File: {filename} elimina todas sus columnas. Por cols_to_eliminate: {len(cols_to_eliminate)}")
 
-
-    end = time.time()
-    #return f"File: {filename} took {round(end-start, 2)}"
 
 
 def log_do_anova(t):
@@ -298,8 +293,9 @@ def do_multiprocess_anova(type_anova="particular", phenotype="", p_value=0.05,
     #Filtro el para los fenotipos
     if type_anova == "particular":
         phenotypes_df = phenotypes_df[["Standard", phenotype]]
-
-    print(f"===== Start: {datetime.today().strftime('%d-%m-%Y %H:%M:%S')}  ======")
+    
+    print(f"    + Creating ANOVA files ... ")
+    # print(f"===== Start: {datetime.today().strftime('%d-%m-%Y %H:%M:%S')}  ======")
     start = time.time()
           
     p = Pool(pool_workers)
@@ -319,8 +315,7 @@ def do_multiprocess_anova(type_anova="particular", phenotype="", p_value=0.05,
     p.close()
     p.join()
 
-    print(INDEX_PATH)
 
     end = time.time()
-    print(f"It took: {round((end-start)/60, 2)}")
-    print("=======================")
+    print(f"    + Files created in: {round((end-start)/60, 2)} min.")
+    print()
