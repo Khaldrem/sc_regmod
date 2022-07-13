@@ -125,6 +125,20 @@ def order_phenotypes_by_files_id(example_filepath, phenotypes_df):
     return phenotypes_df
 
 
+def order_phenotypes_by_id_rows(phenotypes_df, id_rows):
+    #Remove rows that are not in the index file
+    phenotypes_df = phenotypes_df[phenotypes_df['Standard'].isin(id_rows)]
+
+    # #Order by id_rows
+    phenotypes_df = phenotypes_df.sort_values('Standard', key=lambda x: x.map({v:k for k, v in enumerate(id_rows)}))
+    phenotypes_df = phenotypes_df.reset_index()
+
+    #drop columnas innecesarias
+    phenotypes_df = phenotypes_df.drop(['index', 'Standard', 'Haploide-Diploide', 'Ecological info'], axis=1)
+
+    return phenotypes_df
+
+
 def filtered_data(data, phenotypes_df):
     filtered_data = []
     ids = phenotypes_df["Standard"].tolist()
@@ -289,6 +303,7 @@ def do_multiprocess_anova(type_anova="particular", phenotype="", p_value=0.05,
     #Filtro los datos dependiendo del cromosoma que ocupare
     if chromosome != "all":
         phenotypes_df = phenotypes_df.loc[phenotypes_df["Haploide-Diploide"] == chromosome]
+
     
     #Filtro el para los fenotipos
     if type_anova == "particular":

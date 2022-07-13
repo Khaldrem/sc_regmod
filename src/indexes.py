@@ -3,6 +3,23 @@ from src.utils import check_directory, check_working_os
 from src.io import load_json, write_json
 
 
+def insert_models_feature_importance(data = [], key="", phenotype="", exp_number = 0, index_dir_path = "", filename = ""):
+    index_data = load_json(index_dir_path, filename)
+
+    if key not in index_data.keys():
+        index_data[key] = {}
+    
+    if "filter" not in index_data[key].keys():
+        index_data[key]["filter"] = {}
+
+    if phenotype not in index_data[key]["filter"].keys():
+        index_data[key]["filter"][phenotype] = {}
+
+    index_data[key]["filter"][phenotype][str(exp_number)] = data
+    
+    write_json(index_data, index_dir_path, filename)
+
+
 def insert_length(length, key, index_dir_path, filename):
     index_data = load_json(index_dir_path, filename)
 

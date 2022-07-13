@@ -1,0 +1,175 @@
+"""
+def filter_model_step(choosen_phenotypes=[], top_n_features = 5, exp_number=0, MODELS_BASE_PATH="", DATASET_PATH="", PHENOTYPES_PATH="", INDEX_PATH=""):
+    # Load filepaths
+    # dataset_path = f"{models_dataset_path}/{step}/{exp_num}"
+    print(f" + Training filter models.")
+
+    # Limitar archivos
+    filepaths = filepaths[15:55]
+
+    #Limitar fenotipos
+    choosen_phenotypes = choosen_phenotypes[:1]
+
+    n = len(filepaths)
+    idx = 1
+
+    metrics = {
+        "index": [],
+        "filename": [],
+        "has_more_than_top_n_features": [],
+        "time_data_load": [],
+        "total_time_per_file": [],
+        "score_train_data": [],
+        "score_test_data": [],
+        "SM300-Efficiency_training_model_time": [],
+        # "SM300-Rate_training_model_time": [],
+        # "SM300-Lag_training_model_time": [],
+        # "SM300-AUC_training_model_time": [],
+        # "SM60-Efficiency_training_model_time": [],
+        # "SM60-Rate_training_model_time": [],
+        # "SM60-Lag_training_model_time": [],
+        # "SM60-AUC_training_model_time": [],
+        # "Ratio-Efficiency_training_model_time": [],
+        # "Ratio-Rate_training_model_time": [],
+        # "Ratio-Lag_training_model_time": [],
+        # "Ratio-AUC_training_model_time": []
+    }
+
+    #Iterate over files & phenotypes
+    for filepath in filepaths:
+        scoring_metrics = {
+            "SM300-Efficiency": {
+                "MAE": [],
+                "MAPE": [],
+                "MSE": [],
+                "RMSE": [],
+                "r2": []
+            },
+            "SM300-Rate": {
+                "MAE": [],
+                "MAPE": [],
+                "MSE": [],
+                "RMSE": [],
+                "r2": []
+            },
+        }
+
+        start = time.time()
+        
+        metrics["index"].append(idx)
+
+        filename = get_filename(filepath)
+        metrics["filename"].append(filename)
+
+        start_data_load = time.time()
+        df, data_length = data_preparation(filepath, PHENOTYPES_PATH)
+        metrics["time_data_load"].append(round((time.time() - start_data_load), 4))
+
+
+        # Files with columns greater than top_n_features
+        if data_length > top_n_features:
+            metrics["has_more_than_top_n_features"].append(True)
+            
+            for phenotype in choosen_phenotypes:
+                #Y labels
+                y = np.array(df[phenotype])
+
+                #X features
+                features_ohe = pd.get_dummies(df.iloc[:, 0:data_length])
+                X = pd.DataFrame(np.array(features_ohe), columns=features_ohe.columns)
+
+                #Split Train/Test
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.3, shuffle=False)
+
+                # GridSearchCV
+                # Los diferentes rangos que puede abarcar alpha hacen que el algoritmo se demore
+                # a veces demasiado. Por lo que solo he limitado la busqueda a 50 valores.
+                # en general, cae siempre entre valores de 20 a 21, lo cual no se si es demasiado.
+                params_grid_ridge = {
+                    "alpha": np.linspace(0, 150, 100)
+                    # "alpha": np.logspace(0.001, 100, 100)
+                    # "alpha": np.arange(0.1, 25, 1)
+                }
+
+                scoring = ['neg_mean_absolute_error', 'neg_mean_squared_error', 'neg_root_mean_squared_error', 'r2']
+
+                training_model_time = time.time()
+                grid_Ridge = GridSearchCV(estimator=Ridge(), 
+                                        param_grid=params_grid_ridge,
+                                        cv=5, 
+                                        n_jobs=-1, 
+                                        scoring=scoring,
+                                        refit='neg_mean_absolute_error')
+
+                grid_Ridge.fit(X_train, y_train)
+                set_metrics_training_model_time(phenotype, metrics, training_model_time)
+
+                metrics["score_train_data"].append(grid_Ridge.best_estimator_.score(X_train, y_train))
+                metrics["score_test_data"].append(grid_Ridge.best_estimator_.score(X_test, y_test))
+
+
+                y_pred = grid_Ridge.best_estimator_.predict(X_test)
+                set_scoring_metrics(phenotype, scoring_metrics, y_test, y_pred)
+
+                #Save predictions
+                prediction_df = pd.DataFrame.from_dict({"y_test": y_test, "y_pred": y_pred})
+                prediction_df.to_csv(f"{MODELS_BASE_PATH}/filter/{exp_number}/csv/prediction_results_{filename}_{phenotype}.csv")
+
+
+                # Save the model
+                if check_working_os():
+                    joblib.dump(grid_Ridge.best_estimator_, f"{MODELS_BASE_PATH}/filter/{exp_number}/{filename}_{phenotype}.joblib")
+                else:
+                    joblib.dump(grid_Ridge.best_estimator_, f"{MODELS_BASE_PATH}\\filter\\{exp_number}\\{filename}_{phenotype}.joblib")
+
+                # Save cv_results
+                cv_res = pd.DataFrame(grid_Ridge.cv_results_)
+                cv_res.to_csv(f"{MODELS_BASE_PATH}/filter/{exp_number}/csv/cv_results_{filename}_{phenotype}.csv")
+                
+                # Save coef & names
+                coefs = pd.DataFrame(grid_Ridge.best_estimator_.coef_, 
+                                columns=["coefficients"], 
+                                index=grid_Ridge.best_estimator_.feature_names_in_)
+                coefs.to_csv(f"{MODELS_BASE_PATH}/filter/{exp_number}/csv/coef_results_{filename}_{phenotype}.csv")
+                
+                # Get most important features
+                coefs = coefs.sort_values(by="coefficients", ascending=False)
+                most_important_features = set()
+                for i, _ in coefs.iterrows():
+                    if len(most_important_features) == top_n_features:
+                        break
+                    else:
+                        feature_index = int(i.split("_")[0].split("x")[1])
+                        most_important_features.add(feature_index)
+
+                # Write these features on the index
+                insert_models_feature_importance(list(most_important_features), "models", phenotype, exp_number, INDEX_PATH, filename)
+
+        else:
+            metrics["has_more_than_top_n_features"].append(False)
+            for phenotype in choosen_phenotypes:
+                set_metrics_training_model_time(phenotype, metrics, time.time())
+
+            metrics["score_train_data"].append(0)
+            metrics["score_test_data"].append(0)
+
+
+            #Conserve this file
+            print(f"        File: {filename} tiene menos de 10 features.")
+
+        metrics["total_time_per_file"].append(round((time.time() - start), 4))
+        
+        #Save scoring metrics
+        scoring_metrics_df = pd.DataFrame.from_dict(scoring_metrics)
+        scoring_metrics_df.to_csv(f"{MODELS_BASE_PATH}/filter/{exp_number}/csv/scoring_metrics_{filename}.csv")
+        
+        print(f"            ({idx}/{n}) | time: {round(time.time()-start, 2)} sec")
+        idx += 1
+
+    
+    #Save metrics
+    # print(metrics)
+    metrics_df = pd.DataFrame.from_dict(metrics)
+    metrics_df.to_csv(f"{MODELS_BASE_PATH}/filter/{exp_number}/csv/metrics_results.csv")
+
+"""

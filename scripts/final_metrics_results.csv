@@ -1,0 +1,4 @@
+,model_name,phenotype,r2,MAE,MSE,RMSE
+0,Ridge,SM300-Efficiency,0.4012,0.1133,0.0221,0.0221
+1,Lasso,SM300-Efficiency,0.4522,0.1082,0.0202,0.0202
+2,RandomForestRegressor,SM300-Efficiency,0.4414,0.1126,0.0206,0.0206

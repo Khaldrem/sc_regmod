@@ -3,7 +3,7 @@ import os, glob, json
 from sys import platform
 from Bio import AlignIO
 
-from src.utils import check_working_os, check_directory, get_anova_filepaths
+from src.utils import check_working_os, check_directory, get_anova_filepaths, get_filename
     
 
 def get_filepaths(base_path = ""):
@@ -178,9 +178,89 @@ def check_if_anova_files_exists(base_path="", type_anova="", p_value_threshold=0
 
 
 def check_if_models_exists(exp_number = "", MODELS_BASE_PATH="", type_model=""):
-    final_path = MODELS_BASE_PATH + "/" + type_model + "/" + exp_number
+    # Checks if models/<type_model> folder exists
+    # if not then create
+    final_path = MODELS_BASE_PATH + "/" + type_model
+    if not os.path.exists(final_path):
+        os.mkdir(final_path)
+
+    # Check if experiment folder exists
+    final_path = final_path + "/" + exp_number
+    if not os.path.exists(final_path):
+        os.mkdir(final_path)
+        os.mkdir(final_path + "/csv")
+
     if os.path.exists(final_path):
         files = glob.glob(f"{final_path}/*.joblib")
         if len(files) != 0:
             return True
     return False
+
+
+def check_dataset_for_model_step(dataset_path, mode, exp_number):
+    path = f"{dataset_path}/{mode}/{exp_number}"
+    if os.path.exists(path):
+        return True
+    else:
+        os.makedirs(path)
+        return False
+
+
+def get_id_values(example_fp):
+    data = read_phylip_file(example_fp)
+    id_rows = []
+    for row in data:
+        id_rows.append(row.id)
+    
+    return id_rows
+
+def create_id_row_file(example_fp, models_path, exp_num):
+    #Create if file not exists
+    if not os.path.exists(f"{models_path}/id_rows.json"):
+        f = open(f"{models_path}/id_rows.json", "w")
+        json.dump({}, f)
+        f.close()
+
+    #Loads the json
+    f = open(f"{models_path}/id_rows.json", "r")
+    json_object = json.load(f)
+    f.close()
+
+    #Update id_rows
+    id_rows_data = get_id_values(example_fp)
+
+    json_object[exp_num] = id_rows_data
+
+    #Writes it
+    f = open(f"{models_path}/id_rows.json", "w")
+    json.dump(json_object, f)
+    f.close()
+
+
+def create_file_data_csv(anova_path, models_path, exp_num):
+    path = f"{models_path}/exp_{exp_num}_file_data.csv"
+
+    #Checks if file doesnt exists
+    if not os.path.exists(path):
+        file_data = {
+            "filename": [],
+            "data_length": [],
+            "filepath": []
+        }
+
+        filepaths = get_filepaths(anova_path)
+        for f in filepaths:
+            filename = get_filename(f)
+            data = read_phylip_file(f)
+
+            file_data["filename"].append(filename)
+            file_data["data_length"].append(data.get_alignment_length())
+            file_data["filepath"].append(f)
+
+        file_data_df = pd.DataFrame.from_dict(file_data)
+        file_data_df.to_csv(path)
+
+
+
+
+    

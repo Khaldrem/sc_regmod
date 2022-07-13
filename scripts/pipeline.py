@@ -5,10 +5,10 @@ if path_to_package not in sys.path:
 
 from time import time
 
-from src.io import check_if_anova_files_exists, check_if_models_exists
+from src.io import create_id_row_file, create_file_data_csv, check_if_anova_files_exists, check_if_models_exists, check_dataset_for_model_step, get_filepaths
 from src.utils import get_anova_filepaths
 from src.anova import do_multiprocess_anova
-from src.models import filter_model_step
+from src.models import prepare_dataset, filter_model_step, final_model_step, prepare_dataset_final
 
 """
     Pipeline:
@@ -24,24 +24,26 @@ class Pipeline():
             p_value_threshold = 0.0, 
             type_anova = "", 
             chromosome = "",
-            filter_model_name = "",
-            final_model_name = "") -> None:
+            top_n_feature = 0) -> None:
         #Se debe cambiar los path si se corre en windows
         self.CLEAN_BASE_PATH = "/home/khaldrem/code/sc_regmod/dataset/clean"
         self.ANOVA_BASE_PATH = "/home/khaldrem/code/sc_regmod/dataset/anova"
         self.INDEX_BASE_PATH = "/home/khaldrem/code/sc_regmod/dataset/index"
-        self.MODELS_BASE_PATH = "/home/khaldrem/code/sc_regmod/dataset/models" 
+        self.MODELS_BASE_PATH = "/home/khaldrem/code/sc_regmod/dataset/models"
+        self.MODELS_DATASET_PATH = "/home/khaldrem/code/sc_regmod/dataset/models_dataset"
         self.PHENOTPES_FILE_PATH = "/home/khaldrem/code/sc_regmod/dataset/phenotypes/clean_phenotypes.csv"
-
-        #Verificar parametros
 
         #Asignar parametros
         self.exp_number = exp_number
         self.p_value_threshold = p_value_threshold
         self.type_anova = type_anova
         self.chromosome = chromosome
-        self._filter_model_name = filter_model_name
-        self.final_model_name = final_model_name
+        self.top_n_feature = top_n_feature
+        self.choosen_phenotypes = [
+            "SM300-Efficiency", "SM300-Rate", "SM300-Lag", "SM300-AUC",
+            "SM60-Efficiency",  "SM60-Rate",  "SM60-Lag",  "SM60-AUC",
+            "Ratio-Efficiency", "Ratio-Rate", "Ratio-Lag", "Ratio-AUC",
+        ]
 
 
     def run(self):
@@ -52,6 +54,7 @@ class Pipeline():
         print(f"        - p_value_threshold: {self.p_value_threshold}")
         print(f"        - type_anova:        {self.type_anova}")
         print(f"        - chromosome:        {self.chromosome}")
+        print(f"        - top_n_feature:     {self.top_n_feature}")
         print()
 
         #Check if anova data exists
@@ -71,36 +74,128 @@ class Pipeline():
         ANOVA_DATASET = get_anova_filepaths(base_path = self.ANOVA_BASE_PATH, type_anova=self.type_anova, 
                                             p_value=self.p_value_threshold, chromosome=self.chromosome)
 
-        #Check if filter models were created
+        #Create id file
+        create_id_row_file(get_filepaths(ANOVA_DATASET)[0], self.MODELS_BASE_PATH, self.exp_number)
+
+        #Creates files data
+        create_file_data_csv(ANOVA_DATASET, self.MODELS_BASE_PATH, self.exp_number)
+
+        #Prepare dataset if necesary
+        prepare_dataset("filter", self.MODELS_BASE_PATH, 
+                    self.MODELS_DATASET_PATH, self.PHENOTPES_FILE_PATH,
+                    self.exp_number, self.top_n_feature)
+
+
+        # FILTER STEP
         if not check_if_models_exists(self.exp_number, self.MODELS_BASE_PATH, "filter"):
-            print(f" + Training filter models.")
+            filter_model_step(
+                choosen_phenotypes=self.choosen_phenotypes,
+                top_n_features=self.top_n_feature,
+                exp_number = self.exp_number,
+                MODELS_BASE_PATH = self.MODELS_BASE_PATH,
+                MODELS_DATASET_PATH=self.MODELS_DATASET_PATH,
+                INDEX_PATH=self.INDEX_BASE_PATH)
+        else:
+            print(f" + Models files already exists.")
 
-            choosen_phenotypes = [
-                "SM300-Efficiency"
-            ]
+        
+        #Prepare data for final step
+        prepare_dataset_final(choosen_phenotypes=self.choosen_phenotypes, top_n_features=self.top_n_feature,
+                            exp_num=self.exp_number, models_base_path=self.MODELS_BASE_PATH, 
+                            models_dataset_path=self.MODELS_DATASET_PATH, index_dir_path=self.INDEX_BASE_PATH, 
+                            phenotypes_dataset_path=self.PHENOTPES_FILE_PATH)
 
-            filter_model_step(choosen_phenotypes=choosen_phenotypes, DATASET_PATH=ANOVA_DATASET, PHENOTYPES_PATH=self.PHENOTPES_FILE_PATH)
+        # FINAL STEP
+        if not check_if_models_exists(self.exp_number, self.MODELS_BASE_PATH, "final"):
+            print(f" + Training final model.")
 
-
-
-
-
-         
-
+            final_model_step(choosen_phenotypes=self.choosen_phenotypes, exp_number=self.exp_number,
+                        MODELS_BASE_PATH=self.MODELS_BASE_PATH, MODELS_DATASET_PATH=self.MODELS_DATASET_PATH)
+        else:
+            print(f" + Final model already exists.")
 
         end = time()
         print(f"===== Completed in {round((end-start)/60, 2)} min. =====")
 
 
+# ----------------------------------------------------------------- #
+# ------------------------- Experimento 1 ------------------------- #
+# ----------------------------------------------------------------- #
 
-# DATASET_FILEPATHS = get_anova_filepaths(base_path=ANOVA_DATASET_PATH, 
-#                                         type_anova="at_least_one", 
-#                                         p_value=0.05, 
-#                                         chromosome="all")
+# config = {
+#     "exp_number": "1",
+#     "p_value_threshold": 0.01,
+#     "type_anova": "at_least_one",
+#     "chromosome": "all",
+#     "top_n_feature": 10
+# }
 
-# filter_model_step(choosen_phenotypes=VALID_PHENOTYPES, DATASET_PATH=DATASET_FILEPATHS)
+# p1 = Pipeline(exp_number=config["exp_number"], 
+#             p_value_threshold=config["p_value_threshold"], 
+#             type_anova=config["type_anova"], 
+#             chromosome=config["chromosome"],
+#             top_n_feature=config["top_n_feature"])
+# p1.run()
 
-p = Pipeline(exp_number="1", p_value_threshold=0.05, type_anova="at_least_one", chromosome="all")
-p.run()
 
-# 483279
+
+# ----------------------------------------------------------------- #
+# ------------------------- Experimento 2 ------------------------- #
+# ----------------------------------------------------------------- #
+
+# config = {
+#     "exp_number": "2",
+#     "p_value_threshold": 0.01,
+#     "type_anova": "at_least_one",
+#     "chromosome": "haploide-euploide",
+#     "top_n_feature": 10
+# }
+
+# p2 = Pipeline(exp_number=config["exp_number"], 
+#             p_value_threshold=config["p_value_threshold"], 
+#             type_anova=config["type_anova"], 
+#             chromosome=config["chromosome"],
+#             top_n_feature=config["top_n_feature"])
+# p2.run()
+
+
+
+# # ----------------------------------------------------------------- #
+# # ------------------------- Experimento 3 ------------------------- #
+# # ----------------------------------------------------------------- #
+
+# config = {
+#     "exp_number": "3",
+#     "p_value_threshold": 0.01,
+#     "type_anova": "at_least_one",
+#     "chromosome": "diploides-euploides",
+#     "top_n_feature": 10
+# }
+
+# p3 = Pipeline(exp_number=config["exp_number"], 
+#             p_value_threshold=config["p_value_threshold"], 
+#             type_anova=config["type_anova"], 
+#             chromosome=config["chromosome"],
+#             top_n_feature=config["top_n_feature"])
+# p3.run()
+
+
+
+# ----------------------------------------------------------------- #
+# ------------------------- Experimento 4 ------------------------- #
+# ----------------------------------------------------------------- #
+
+config = {
+    "exp_number": "4",
+    "p_value_threshold": 0.01,
+    "type_anova": "at_least_one",
+    "chromosome": "---",
+    "top_n_feature": 10
+}
+
+p4 = Pipeline(exp_number=config["exp_number"], 
+            p_value_threshold=config["p_value_threshold"], 
+            type_anova=config["type_anova"], 
+            chromosome=config["chromosome"],
+            top_n_feature=config["top_n_feature"])
+p4.run()
